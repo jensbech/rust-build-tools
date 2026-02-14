@@ -7,7 +7,9 @@ set -e
 
 # --- Ensure cargo is in PATH (rustup) ---
 
-. "$HOME/.cargo/env" 2>/dev/null || true
+if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+fi
 
 # --- Auto-detect from Cargo.toml ---
 
