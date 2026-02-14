@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+set -e
+
+# rust-build: Centralized build script for Rust projects
+# Auto-detects binary name and version from Cargo.toml in the current directory.
+# Must be run from the root of a Rust project.
+
+# --- Auto-detect from Cargo.toml ---
+
+if [ ! -f "Cargo.toml" ]; then
+    echo "Error: No Cargo.toml found in current directory"
+    echo "Run this script from the root of a Rust project."
+    exit 1
+fi
+
+BINARY_NAME=$(grep '^name' Cargo.toml | head -1 | sed 's/name = "\([^"]*\)".*/\1/')
+VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\([^"]*\)".*/\1/')
+
+if [ -z "$BINARY_NAME" ]; then
+    echo "Error: Could not detect binary name from Cargo.toml"
+    exit 1
+fi
+
+# --- Targets ---
+
+TARGETS=(
+    aarch64-apple-darwin
+    x86_64-apple-darwin
+    x86_64-unknown-linux-musl
+    aarch64-unknown-linux-musl
+    x86_64-pc-windows-gnu
+)
+
+# --- Commands ---
+
+cmd_setup() {
+    echo "Setting up cross-compilation toolchain..."
+    rustup default stable
+    cargo install cargo-zigbuild
+    rustup target add "${TARGETS[@]}"
+    echo "Setup complete"
+}
+
+cmd_build() {
+    echo "Building release binary..."
+    cargo build --release
+    echo "Build complete"
+    echo ""
+    echo "Binary:"
+    ls -lh "target/release/$BINARY_NAME"
+}
+
+cmd_build_arm() {
+    echo "Building for Apple Silicon (aarch64)..."
+    cargo build --release --target aarch64-apple-darwin
+    echo "aarch64 complete"
+    echo ""
+    echo "Binary:"
+    ls -lh "target/aarch64-apple-darwin/release/$BINARY_NAME"
+}
+
+cmd_build_intel() {
+    echo "Building for Intel (x86_64)..."
+    cargo build --release --target x86_64-apple-darwin
+    echo "x86_64 complete"
+    echo ""
+    echo "Binary:"
+    ls -lh "target/x86_64-apple-darwin/release/$BINARY_NAME"
+}
+
+cmd_build_linux_x64() {
+    echo "Building for Linux x86_64 (musl)..."
+    cargo zigbuild --release --target x86_64-unknown-linux-musl
+    echo "Linux x86_64 complete"
+    echo ""
+    echo "Binary:"
+    ls -lh "target/x86_64-unknown-linux-musl/release/$BINARY_NAME"
+}
+
+cmd_build_linux_arm() {
+    echo "Building for Linux ARM64 (musl)..."
+    cargo zigbuild --release --target aarch64-unknown-linux-musl
+    echo "Linux ARM64 complete"
+    echo ""
+    echo "Binary:"
+    ls -lh "target/aarch64-unknown-linux-musl/release/$BINARY_NAME"
+}
+
+cmd_build_windows() {
+    echo "Building for Windows x86_64..."
+    cargo zigbuild --release --target x86_64-pc-windows-gnu
+    echo "Windows x86_64 complete"
+    echo ""
+    echo "Binary:"
+    ls -lh "target/x86_64-pc-windows-gnu/release/$BINARY_NAME.exe"
+}
+
+cmd_build_dev() {
+    cargo build
+}
+
+cmd_release() {
+    cmd_build_arm
+
+    RELEASE_DIR="release"
+    mkdir -p "$RELEASE_DIR"
+    cp "target/aarch64-apple-darwin/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-aarch64-apple-darwin"
+    echo ""
+    echo "Release binary created in $RELEASE_DIR/"
+    echo ""
+    ls -lh "$RELEASE_DIR/"
+    echo ""
+    echo "Upload binary to Forgejo as release asset"
+}
+
+cmd_release_all() {
+    cmd_setup
+    cmd_build_arm
+    cmd_build_intel
+    cmd_build_linux_x64
+    cmd_build_linux_arm
+    cmd_build_windows
+
+    RELEASE_DIR="release"
+    mkdir -p "$RELEASE_DIR"
+    cp "target/aarch64-apple-darwin/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-aarch64-apple-darwin"
+    cp "target/x86_64-apple-darwin/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-x86_64-apple-darwin"
+    cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-x86_64-unknown-linux-musl"
+    cp "target/aarch64-unknown-linux-musl/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-aarch64-unknown-linux-musl"
+    cp "target/x86_64-pc-windows-gnu/release/$BINARY_NAME.exe" "$RELEASE_DIR/$BINARY_NAME-$VERSION-x86_64-pc-windows-gnu.exe"
+    echo ""
+    echo "Release binaries created in $RELEASE_DIR/"
+    echo ""
+    ls -lh "$RELEASE_DIR/"
+    echo ""
+    echo "Upload binaries to Forgejo as release assets"
+}
+
+cmd_test() {
+    cargo test
+}
+
+cmd_lint() {
+    cargo fmt
+    cargo clippy -- -D warnings
+}
+
+cmd_clean() {
+    cargo clean
+    rm -rf release/
+    echo "Cleaned"
+}
+
+cmd_version() {
+    echo "$VERSION"
+}
+
+cmd_help() {
+    echo "rust-build: Centralized Rust build tools"
+    echo ""
+    echo "Usage: rust-build <command>"
+    echo ""
+    echo "Detected project: $BINARY_NAME v$VERSION"
+    echo ""
+    echo "Commands:"
+    echo "  setup          Install cross-compilation toolchain and targets"
+    echo "  build          Build release binary for current architecture"
+    echo "  build-arm      Build for Apple Silicon (aarch64-apple-darwin)"
+    echo "  build-intel    Build for Intel macOS (x86_64-apple-darwin)"
+    echo "  build-linux-x64  Build for Linux x86_64 (static musl)"
+    echo "  build-linux-arm  Build for Linux ARM64 (static musl)"
+    echo "  build-windows  Build for Windows x86_64"
+    echo "  build-dev      Build debug version (faster)"
+    echo "  release        Build ARM binary and create release directory"
+    echo "  release-all    Build all 5 targets and create release directory"
+    echo "  test           Run tests"
+    echo "  lint           Format and lint (cargo fmt + clippy)"
+    echo "  clean          Clean build artifacts and release directory"
+    echo "  version        Print version from Cargo.toml"
+    echo "  help           Show this help"
+}
+
+# --- Main ---
+
+COMMAND="${1:-help}"
+
+case "$COMMAND" in
+    setup)          cmd_setup ;;
+    build)          cmd_build ;;
+    build-arm)      cmd_build_arm ;;
+    build-intel)    cmd_build_intel ;;
+    build-linux-x64)  cmd_build_linux_x64 ;;
+    build-linux-arm)  cmd_build_linux_arm ;;
+    build-windows)  cmd_build_windows ;;
+    build-dev)      cmd_build_dev ;;
+    release)        cmd_release ;;
+    release-all)    cmd_release_all ;;
+    test)           cmd_test ;;
+    lint)           cmd_lint ;;
+    clean)          cmd_clean ;;
+    version)        cmd_version ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo "Unknown command: $COMMAND"
+        echo "Run 'rust-build help' for usage."
+        exit 1
+        ;;
+esac
