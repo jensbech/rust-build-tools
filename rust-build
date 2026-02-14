@@ -5,6 +5,10 @@ set -e
 # Auto-detects binary name and version from Cargo.toml in the current directory.
 # Must be run from the root of a Rust project.
 
+# --- Ensure cargo is in PATH (rustup) ---
+
+. "$HOME/.cargo/env" 2>/dev/null || true
+
 # --- Auto-detect from Cargo.toml ---
 
 if [ ! -f "Cargo.toml" ]; then
