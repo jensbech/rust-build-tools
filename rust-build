@@ -121,11 +121,38 @@ cmd_release() {
 
 cmd_release_all() {
     cmd_setup
-    cmd_build_arm
-    cmd_build_intel
-    cmd_build_linux_x64
-    cmd_build_linux_arm
-    cmd_build_windows
+
+    echo "Building all targets concurrently..."
+    PIDS=()
+    LABELS=()
+
+    cargo build --release --target aarch64-apple-darwin 2>&1 | sed 's/^/[arm]     /' &
+    PIDS+=($!); LABELS+=("aarch64-apple-darwin")
+
+    cargo build --release --target x86_64-apple-darwin 2>&1 | sed 's/^/[intel]   /' &
+    PIDS+=($!); LABELS+=("x86_64-apple-darwin")
+
+    cargo zigbuild --release --target x86_64-unknown-linux-musl 2>&1 | sed 's/^/[linux64] /' &
+    PIDS+=($!); LABELS+=("x86_64-unknown-linux-musl")
+
+    cargo zigbuild --release --target aarch64-unknown-linux-musl 2>&1 | sed 's/^/[linarm]  /' &
+    PIDS+=($!); LABELS+=("aarch64-unknown-linux-musl")
+
+    cargo zigbuild --release --target x86_64-pc-windows-gnu 2>&1 | sed 's/^/[win]     /' &
+    PIDS+=($!); LABELS+=("x86_64-pc-windows-gnu")
+
+    FAILED=0
+    for i in "${!PIDS[@]}"; do
+        if ! wait "${PIDS[$i]}"; then
+            echo "FAILED: ${LABELS[$i]}"
+            FAILED=1
+        fi
+    done
+    if [ "$FAILED" -eq 1 ]; then
+        echo "Some builds failed"
+        exit 1
+    fi
+    echo "All targets built successfully"
 
     RELEASE_DIR="release"
     mkdir -p "$RELEASE_DIR"
