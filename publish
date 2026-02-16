@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -e
+
+REPO="jensbech/rust-build-tools"
+
+# Get current latest tag
+CURRENT=$(gh release view --repo "$REPO" --json tagName -q '.tagName' 2>/dev/null || echo "v0.0.0")
+CURRENT="${CURRENT#v}"
+IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+
+echo "Current version: ${CURRENT}"
+echo ""
+echo "  1) patch  → ${MAJOR}.${MINOR}.$((PATCH+1))"
+echo "  2) minor  → ${MAJOR}.$((MINOR+1)).0"
+echo "  3) major  → $((MAJOR+1)).0.0"
+echo ""
+read -rp "Bump type [1/2/3]: " CHOICE
+
+case "$CHOICE" in
+    1|patch) NEW="${MAJOR}.${MINOR}.$((PATCH+1))" ;;
+    2|minor) NEW="${MAJOR}.$((MINOR+1)).0" ;;
+    3|major) NEW="$((MAJOR+1)).0.0" ;;
+    *) echo "Invalid choice"; exit 1 ;;
+esac
+
+TAG="v${NEW}"
+
+read -rp "Release notes: " NOTES
+
+if [ -z "$NOTES" ]; then
+    echo "Release notes cannot be empty"
+    exit 1
+fi
+
+echo ""
+echo "Publishing ${TAG}..."
+
+git add -A && git commit -m "${TAG}: ${NOTES}" || true
+git push origin main
+
+gh release create "$TAG" ./rust-build \
+    --repo "$REPO" \
+    --title "$TAG" \
+    --notes "$NOTES" \
+    --latest
+
+echo "Done: https://github.com/${REPO}/releases/tag/${TAG}"
