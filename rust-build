@@ -27,15 +27,42 @@ if [ -z "$BINARY_NAME" ]; then
     exit 1
 fi
 
-# --- Targets ---
+# --- Target mapping ---
 
-TARGETS=(
-    aarch64-apple-darwin
-    x86_64-apple-darwin
-    x86_64-unknown-linux-musl
-    aarch64-unknown-linux-musl
-    x86_64-pc-windows-gnu
-)
+ALL_TARGETS=(arm intel linux-x64 linux-arm windows)
+
+target_triple() {
+    case "$1" in
+        arm)        echo "aarch64-apple-darwin" ;;
+        intel)      echo "x86_64-apple-darwin" ;;
+        linux-x64)  echo "x86_64-unknown-linux-musl" ;;
+        linux-arm)  echo "aarch64-unknown-linux-musl" ;;
+        windows)    echo "x86_64-pc-windows-gnu" ;;
+        *) echo "Unknown target: $1" >&2; return 1 ;;
+    esac
+}
+
+target_label() {
+    case "$1" in
+        arm)        echo "[arm]     " ;;
+        intel)      echo "[intel]   " ;;
+        linux-x64)  echo "[linux64] " ;;
+        linux-arm)  echo "[linarm]  " ;;
+        windows)    echo "[win]     " ;;
+    esac
+}
+
+build_one() {
+    local TRIPLE="$1"
+    case "$TRIPLE" in
+        *-linux-*|*-windows-*)
+            cargo zigbuild --release --target "$TRIPLE"
+            ;;
+        *)
+            cargo build --release --target "$TRIPLE"
+            ;;
+    esac
+}
 
 # --- Commands ---
 
@@ -43,7 +70,11 @@ cmd_setup() {
     echo "Setting up cross-compilation toolchain..."
     rustup default stable
     cargo install cargo-zigbuild
-    rustup target add "${TARGETS[@]}"
+    local TRIPLES=()
+    for t in "${ALL_TARGETS[@]}"; do
+        TRIPLES+=("$(target_triple "$t")")
+    done
+    rustup target add "${TRIPLES[@]}"
     echo "Setup complete"
 }
 
@@ -105,41 +136,64 @@ cmd_build_dev() {
     cargo build
 }
 
-cmd_release() {
-    cmd_build_arm
-
-    RELEASE_DIR="release"
-    mkdir -p "$RELEASE_DIR"
-    cp "target/aarch64-apple-darwin/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-aarch64-apple-darwin"
+cmd_bump() {
+    CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+    echo "Current version: ${CURRENT}"
     echo ""
-    echo "Release binary created in $RELEASE_DIR/"
+    echo "  1) patch  → ${MAJOR}.${MINOR}.$((PATCH+1))"
+    echo "  2) minor  → ${MAJOR}.$((MINOR+1)).0"
+    echo "  3) major  → $((MAJOR+1)).0.0"
     echo ""
-    ls -lh "$RELEASE_DIR/"
-    echo ""
-    echo "Upload binary to Forgejo as release asset"
+    read -rp "Bump type [1/2/3]: " CHOICE
+    case "$CHOICE" in
+        1|patch) NEW="${MAJOR}.${MINOR}.$((PATCH+1))" ;;
+        2|minor) NEW="${MAJOR}.$((MINOR+1)).0" ;;
+        3|major) NEW="$((MAJOR+1)).0.0" ;;
+        *) echo "Invalid choice"; exit 1 ;;
+    esac
+    sed -i '' "s/^version = \"${CURRENT}\"/version = \"${NEW}\"/" Cargo.toml
+    VERSION="$NEW"
+    echo "Bumped ${CURRENT} → ${NEW}"
 }
 
 cmd_release_all() {
-    cmd_setup
+    local REQUESTED=("$@")
+    if [ ${#REQUESTED[@]} -eq 0 ]; then
+        REQUESTED=("${ALL_TARGETS[@]}")
+    fi
 
-    echo "Building all targets concurrently..."
+    # Ensure targets are installed
+    local TRIPLES=()
+    for t in "${REQUESTED[@]}"; do
+        TRIPLES+=("$(target_triple "$t")")
+    done
+    rustup target add "${TRIPLES[@]}" 2>/dev/null || true
+
+    # Install zigbuild if needed
+    local NEEDS_ZIG=false
+    for t in "${REQUESTED[@]}"; do
+        case "$t" in
+            linux-*|windows) NEEDS_ZIG=true ;;
+        esac
+    done
+    if [ "$NEEDS_ZIG" = true ] && ! command -v cargo-zigbuild &>/dev/null; then
+        echo "Installing cargo-zigbuild..."
+        cargo install cargo-zigbuild
+    fi
+
+    rm -rf release
+    echo "Building ${#REQUESTED[@]} targets concurrently..."
+
     PIDS=()
     LABELS=()
-
-    cargo build --release --target aarch64-apple-darwin 2>&1 | sed 's/^/[arm]     /' &
-    PIDS+=($!); LABELS+=("aarch64-apple-darwin")
-
-    cargo build --release --target x86_64-apple-darwin 2>&1 | sed 's/^/[intel]   /' &
-    PIDS+=($!); LABELS+=("x86_64-apple-darwin")
-
-    cargo zigbuild --release --target x86_64-unknown-linux-musl 2>&1 | sed 's/^/[linux64] /' &
-    PIDS+=($!); LABELS+=("x86_64-unknown-linux-musl")
-
-    cargo zigbuild --release --target aarch64-unknown-linux-musl 2>&1 | sed 's/^/[linarm]  /' &
-    PIDS+=($!); LABELS+=("aarch64-unknown-linux-musl")
-
-    cargo zigbuild --release --target x86_64-pc-windows-gnu 2>&1 | sed 's/^/[win]     /' &
-    PIDS+=($!); LABELS+=("x86_64-pc-windows-gnu")
+    for t in "${REQUESTED[@]}"; do
+        TRIPLE=$(target_triple "$t")
+        LABEL=$(target_label "$t")
+        build_one "$TRIPLE" 2>&1 | sed "s/^/${LABEL}/" &
+        PIDS+=($!)
+        LABELS+=("$t")
+    done
 
     FAILED=0
     for i in "${!PIDS[@]}"; do
@@ -154,19 +208,66 @@ cmd_release_all() {
     fi
     echo "All targets built successfully"
 
-    RELEASE_DIR="release"
-    mkdir -p "$RELEASE_DIR"
-    cp "target/aarch64-apple-darwin/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-aarch64-apple-darwin"
-    cp "target/x86_64-apple-darwin/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-x86_64-apple-darwin"
-    cp "target/x86_64-unknown-linux-musl/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-x86_64-unknown-linux-musl"
-    cp "target/aarch64-unknown-linux-musl/release/$BINARY_NAME" "$RELEASE_DIR/$BINARY_NAME-$VERSION-aarch64-unknown-linux-musl"
-    cp "target/x86_64-pc-windows-gnu/release/$BINARY_NAME.exe" "$RELEASE_DIR/$BINARY_NAME-$VERSION-x86_64-pc-windows-gnu.exe"
+    mkdir -p release
+    for t in "${REQUESTED[@]}"; do
+        TRIPLE=$(target_triple "$t")
+        if [ "$t" = "windows" ]; then
+            cp "target/${TRIPLE}/release/${BINARY_NAME}.exe" "release/${BINARY_NAME}-${VERSION}-${TRIPLE}.exe"
+        else
+            cp "target/${TRIPLE}/release/${BINARY_NAME}" "release/${BINARY_NAME}-${VERSION}-${TRIPLE}"
+        fi
+    done
+
     echo ""
-    echo "Release binaries created in $RELEASE_DIR/"
-    echo ""
-    ls -lh "$RELEASE_DIR/"
-    echo ""
-    echo "Upload binaries to Forgejo as release assets"
+    echo "Release binaries:"
+    ls -lh release/
+}
+
+cmd_publish() {
+    local REPO="$1"
+    if [ -z "$REPO" ]; then
+        echo "Usage: rust-build publish <github-repo>"
+        exit 1
+    fi
+    VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\([^"]*\)".*/\1/')
+    local TAG="v${VERSION}"
+    local ASSETS=(release/${BINARY_NAME}-${VERSION}-*)
+    if [ ${#ASSETS[@]} -eq 0 ]; then
+        echo "No release assets found for ${BINARY_NAME}-${VERSION}"
+        exit 1
+    fi
+    echo "Publishing ${TAG} to GitHub (${#ASSETS[@]} assets)..."
+    git add -A && git commit -m "Release ${TAG}" || true
+    git tag -f "$TAG"
+    git remote get-url github &>/dev/null || git remote add github "https://github.com/${REPO}.git"
+    local BRANCH
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    git push github "$BRANCH" --force
+    git push github "$TAG" --force
+    if gh release view "$TAG" --repo "$REPO" &>/dev/null; then
+        echo "Deleting existing release ${TAG}..."
+        gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag=false
+    fi
+    gh release create "$TAG" "${ASSETS[@]}" \
+        --repo "$REPO" \
+        --title "$TAG" \
+        --notes "Release ${VERSION}" \
+        --latest
+    echo "Published ${TAG}"
+    echo "Done: https://github.com/${REPO}/releases/tag/${TAG}"
+}
+
+cmd_release() {
+    local REPO="$1"
+    if [ -z "$REPO" ]; then
+        echo "Usage: rust-build release <github-repo> [targets...]"
+        echo "Targets: arm intel linux-x64 linux-arm windows (default: all)"
+        exit 1
+    fi
+    shift
+    cmd_bump
+    cmd_release_all "$@"
+    cmd_publish "$REPO"
 }
 
 cmd_test() {
@@ -191,48 +292,65 @@ cmd_version() {
 cmd_help() {
     echo "rust-build: Centralized Rust build tools"
     echo ""
-    echo "Usage: rust-build <command>"
+    echo "Usage: rust-build <command> [args...]"
     echo ""
     echo "Detected project: $BINARY_NAME v$VERSION"
     echo ""
-    echo "Commands:"
-    echo "  setup          Install cross-compilation toolchain and targets"
-    echo "  build          Build release binary for current architecture"
-    echo "  build-arm      Build for Apple Silicon (aarch64-apple-darwin)"
-    echo "  build-intel    Build for Intel macOS (x86_64-apple-darwin)"
-    echo "  build-linux-x64  Build for Linux x86_64 (static musl)"
-    echo "  build-linux-arm  Build for Linux ARM64 (static musl)"
-    echo "  build-windows  Build for Windows x86_64"
-    echo "  build-dev      Build debug version (faster)"
-    echo "  release        Build ARM binary and create release directory"
-    echo "  release-all    Build all 5 targets and create release directory"
-    echo "  test           Run tests"
-    echo "  lint           Format and lint (cargo fmt + clippy)"
-    echo "  clean          Clean build artifacts and release directory"
-    echo "  version        Print version from Cargo.toml"
-    echo "  help           Show this help"
+    echo "Build commands:"
+    echo "  setup              Install cross-compilation toolchain and all targets"
+    echo "  build              Build release binary for current architecture"
+    echo "  build-arm          Build for Apple Silicon (aarch64-apple-darwin)"
+    echo "  build-intel        Build for Intel macOS (x86_64-apple-darwin)"
+    echo "  build-linux-x64    Build for Linux x86_64 (static musl)"
+    echo "  build-linux-arm    Build for Linux ARM64 (static musl)"
+    echo "  build-windows      Build for Windows x86_64"
+    echo "  build-dev          Build debug version (faster)"
+    echo ""
+    echo "Release commands:"
+    echo "  bump               Interactive version bump (patch/minor/major)"
+    echo "  release-all [T..]  Build targets and create release directory"
+    echo "  publish REPO       Publish release assets to GitHub"
+    echo "  release REPO [T..] Full workflow: bump + build + publish"
+    echo ""
+    echo "Targets: arm intel linux-x64 linux-arm windows"
+    echo "  (release-all defaults to all 5 if none specified)"
+    echo ""
+    echo "Other commands:"
+    echo "  test               Run tests"
+    echo "  lint               Format and lint (cargo fmt + clippy)"
+    echo "  clean              Clean build artifacts and release directory"
+    echo "  version            Print version from Cargo.toml"
+    echo "  help               Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  rust-build release jensbech/myapp arm intel"
+    echo "  rust-build release-all linux-x64 linux-arm"
+    echo "  rust-build publish jensbech/myapp"
 }
 
 # --- Main ---
 
 COMMAND="${1:-help}"
+shift 2>/dev/null || true
 
 case "$COMMAND" in
-    setup)          cmd_setup ;;
-    build)          cmd_build ;;
-    build-arm)      cmd_build_arm ;;
-    build-intel)    cmd_build_intel ;;
+    setup)            cmd_setup ;;
+    build)            cmd_build ;;
+    build-arm)        cmd_build_arm ;;
+    build-intel)      cmd_build_intel ;;
     build-linux-x64)  cmd_build_linux_x64 ;;
     build-linux-arm)  cmd_build_linux_arm ;;
-    build-windows)  cmd_build_windows ;;
-    build-dev)      cmd_build_dev ;;
-    release)        cmd_release ;;
-    release-all)    cmd_release_all ;;
-    test)           cmd_test ;;
-    lint)           cmd_lint ;;
-    clean)          cmd_clean ;;
-    version)        cmd_version ;;
-    help|--help|-h) cmd_help ;;
+    build-windows)    cmd_build_windows ;;
+    build-dev)        cmd_build_dev ;;
+    bump)             cmd_bump ;;
+    release-all)      cmd_release_all "$@" ;;
+    publish)          cmd_publish "$@" ;;
+    release)          cmd_release "$@" ;;
+    test)             cmd_test ;;
+    lint)             cmd_lint ;;
+    clean)            cmd_clean ;;
+    version)          cmd_version ;;
+    help|--help|-h)   cmd_help ;;
     *)
         echo "Unknown command: $COMMAND"
         echo "Run 'rust-build help' for usage."
