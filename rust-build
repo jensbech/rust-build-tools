@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -eo pipefail
 
 # rust-build: Centralized build script for Rust projects
 # Auto-detects binary name and version from Cargo.toml in the current directory.
@@ -183,29 +183,15 @@ cmd_release_all() {
     fi
 
     rm -rf release
-    echo "Building ${#REQUESTED[@]} targets concurrently..."
+    echo "Building ${#REQUESTED[@]} targets..."
 
-    PIDS=()
-    LABELS=()
     for t in "${REQUESTED[@]}"; do
         TRIPLE=$(target_triple "$t")
         LABEL=$(target_label "$t")
-        build_one "$TRIPLE" 2>&1 | sed "s/^/${LABEL}/" &
-        PIDS+=($!)
-        LABELS+=("$t")
+        echo "${LABEL}Building ${t} (${TRIPLE})..."
+        build_one "$TRIPLE" 2>&1 | sed "s/^/${LABEL}/"
+        echo "${LABEL}Done"
     done
-
-    FAILED=0
-    for i in "${!PIDS[@]}"; do
-        if ! wait "${PIDS[$i]}"; then
-            echo "FAILED: ${LABELS[$i]}"
-            FAILED=1
-        fi
-    done
-    if [ "$FAILED" -eq 1 ]; then
-        echo "Some builds failed"
-        exit 1
-    fi
     echo "All targets built successfully"
 
     mkdir -p release
